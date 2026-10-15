@@ -24,6 +24,7 @@ class MainForm : Form
     public MainForm()
     {
         Text = "IP Info";
+        Icon = Icon.ExtractAssociatedIcon(Environment.ProcessPath!);
         ClientSize = new Size(350, 270);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
