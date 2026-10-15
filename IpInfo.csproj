@@ -8,6 +8,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>IpInfo</AssemblyName>
     <RootNamespace>IpInfo</RootNamespace>
+    <ApplicationIcon>app.ico</ApplicationIcon>
   </PropertyGroup>
 
 </Project>
