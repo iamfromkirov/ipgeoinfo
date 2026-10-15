@@ -1,3 +1,4 @@
+using System.Net.NetworkInformation;
 using System.Text.Json;
 
 namespace IpInfo;
@@ -14,12 +15,14 @@ static class Program
 
 class MainForm : Form
 {
-    static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(10) };
     static readonly string[] Fields = { "ip", "hostname", "city", "region", "country", "org" };
 
     readonly Dictionary<string, Label> values = new();
     readonly Button refreshButton = new();
     readonly Label status = new();
+
+    CancellationTokenSource? cts;
+    int networkChangeId;
 
     public MainForm()
     {
@@ -81,38 +84,81 @@ class MainForm : Form
         Controls.Add(status);
 
         Shown += async (_, _) => await LoadInfoAsync();
+
+        // Автообновление при смене сети (включение/отключение VPN)
+        NetworkChange.NetworkAddressChanged += OnNetworkChanged;
+        FormClosed += (_, _) =>
+        {
+            NetworkChange.NetworkAddressChanged -= OnNetworkChanged;
+            cts?.Cancel();
+        };
+    }
+
+    void OnNetworkChanged(object? sender, EventArgs e)
+    {
+        // Событие приходит из фонового потока и может сработать несколько раз подряд
+        if (!IsHandleCreated || IsDisposed) return;
+
+        BeginInvoke(new Action(async () =>
+        {
+            int id = ++networkChangeId;
+            await Task.Delay(2000);              // подождать, пока VPN поднимется
+            if (id == networkChangeId && !IsDisposed)
+                await LoadInfoAsync();           // обновить один раз, а не на каждое событие
+        }));
     }
 
     async Task LoadInfoAsync()
     {
-        refreshButton.Enabled = false;
+        cts?.Cancel();                           // отменить предыдущую незавершённую загрузку
+        cts = new CancellationTokenSource();
+        var token = cts.Token;
+
         status.ForeColor = Color.Gray;
         status.Text = "Загрузка...";
 
-        try
+        for (int attempt = 1; attempt <= 3; attempt++)
         {
-            string json = await Http.GetStringAsync("https://ipinfo.io/json");
-            using var doc = JsonDocument.Parse(json);
-            var root = doc.RootElement;
-
-            foreach (var field in Fields)
+            try
             {
-                string text = "N/A";
-                if (root.TryGetProperty(field, out var el) && el.ValueKind == JsonValueKind.String)
-                    text = el.GetString() ?? "N/A";
-                values[field].Text = text;
-            }
+                // Новый клиент на каждый запрос: нет старых соединений после смены VPN
+                using var http = new HttpClient(new SocketsHttpHandler
+                {
+                    ConnectTimeout = TimeSpan.FromSeconds(5)
+                })
+                { Timeout = TimeSpan.FromSeconds(8) };
 
-            status.Text = "Обновлено: " + DateTime.Now.ToLongTimeString();
-        }
-        catch (Exception ex)
-        {
-            status.ForeColor = Color.Firebrick;
-            status.Text = "Ошибка: " + ex.Message;
-        }
-        finally
-        {
-            refreshButton.Enabled = true;
+                string json = await http.GetStringAsync("https://ipinfo.io/json", token);
+                using var doc = JsonDocument.Parse(json);
+                var root = doc.RootElement;
+
+                foreach (var field in Fields)
+                {
+                    string text = "N/A";
+                    if (root.TryGetProperty(field, out var el) && el.ValueKind == JsonValueKind.String)
+                        text = el.GetString() ?? "N/A";
+                    values[field].Text = text;
+                }
+
+                status.Text = "Обновлено: " + DateTime.Now.ToLongTimeString();
+                return;
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                return;                          // запущена более новая загрузка
+            }
+            catch (Exception ex)
+            {
+                if (attempt == 3)
+                {
+                    status.ForeColor = Color.Firebrick;
+                    status.Text = "Ошибка: " + ex.Message;
+                    return;
+                }
+                status.Text = $"Повтор ({attempt}/3)...";
+                try { await Task.Delay(1500, token); }
+                catch (OperationCanceledException) { return; }
+            }
         }
     }
 }
